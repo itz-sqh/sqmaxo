@@ -1,87 +1,104 @@
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 #include <X11/keysym.h>
 
 #include <stdio.h>
-#include <unistd.h>
+#include <string.h>
 
-struct coords {
-  int x1;
-  int x2;
-  int y1;
-  int y2;
-};
+Display *dpy;
+Window w;
+GC gc;
+int black, white;
+int alive = 1;
 
 void
-swap(int *x, int *y)
+init_window(void)
 {
-  int t = *x;
+  int scr_no;
 
-  *x = *y;
-  *y = t;
+  dpy = XOpenDisplay(NULL);
+  scr_no = DefaultScreen(dpy);
+  black = BlackPixel(dpy, scr_no);
+  white = WhitePixel(dpy, scr_no);
+  w = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 500, 400, 0, white, white);
+  XSelectInput(dpy, w, KeyPressMask | StructureNotifyMask);
+  XMapWindow(dpy, w);
 }
 
 void
-centre(struct coords *c, int width, int height)
+init_gc(void)
 {
-  c->x1 = width / 3;
-  c->x2 = 2 * c->x1;
-  c->y1 = height / 3;
-  c->y2 = 2 * c->y1;
+  Font fnt;
+
+  gc = XCreateGC(dpy, w, 0, NULL);
+  XSetForeground(dpy, gc, black);
+  fnt = XLoadFont(dpy, "fixed");
+  XSetFont(dpy, gc, fnt);
+}
+
+void
+handle_ctrl(KeySym key_sym)
+{
+  switch (key_sym) {
+  case XK_q:
+    alive = 0;
+    break;
+  default:
+    break;
+  }
+}
+
+void
+event_loop(void)
+{
+  XEvent e;
+  KeySym key_sym;
+  XKeyEvent *key_event;
+  char buf[32];
+  int len, x = 10, y = 10, width = 10;
+
+  do {
+    XNextEvent(dpy, &e);
+  } while (e.type != MapNotify);
+  while (alive) {
+    XNextEvent(dpy, &e);
+    switch (e.type) {
+    case KeyPress:
+      key_event = &e.xkey;
+      key_sym = XLookupKeysym(key_event, 0);
+      if ((key_event->state & ControlMask)) {
+        handle_ctrl(key_sym);
+      } else {
+        len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
+        if (key_sym == XK_BackSpace) {
+          if (x > width)
+            x -= width;
+          XClearArea(dpy, w, x, y - width, 2 * width, 2 * width, False);
+        } else if (len > 0) {
+          XDrawString(dpy, w, gc, x, y, buf, len);
+          x += width;
+        }
+        XFlush(dpy);
+      }
+      break;
+    }
+  }
+}
+
+void
+cleanup(void)
+{
+  XFreeGC(dpy, gc);
+  XDestroyWindow(dpy, w);
+  XCloseDisplay(dpy);
 }
 
 int
 main(void)
 {
-  Display *dpy;
-  Window w, root;
-  GC gc;
-  XEvent e;
-  XWindowAttributes attr;
-  int black, white;
-  int scr_no;
-  long input_mask = KeyPressMask | ExposureMask | StructureNotifyMask;
-  KeySym k;
-  struct coords c;
-
-  dpy = XOpenDisplay(NULL);
-  scr_no = DefaultScreen(dpy);
-  root = DefaultRootWindow(dpy);
-  black = BlackPixel(dpy, scr_no);
-  white = WhitePixel(dpy, scr_no);
-  w = XCreateSimpleWindow(dpy, root, 0, 0, 500, 400, 0, black, black);
-  XSelectInput(dpy, w, input_mask);
-  XMapWindow(dpy, w);
-  gc = XCreateGC(dpy, w, 0, NULL);
-  XSetForeground(dpy, gc, white);
-  do {
-    XNextEvent(dpy, &e);
-  } while (e.type != MapNotify);
-  for (;;) {
-    XNextEvent(dpy, &e);
-    switch (e.type) {
-    case Expose:
-      XClearWindow(dpy, w);
-      XGetWindowAttributes(dpy, w, &attr);
-      centre(&c, attr.width, attr.height);
-      XDrawLine(dpy, w, gc, c.x1, c.y1, c.x2, c.y2);
-      XFlush(dpy);
-      break;
-    case KeyPress:
-      switch (k = XLookupKeysym(&e.xkey, 0)) {
-      case XK_r:
-        XClearWindow(dpy, w);
-        swap(&c.x1, &c.x2);
-        XDrawLine(dpy, w, gc, c.x1, c.y1, c.x2, c.y2);
-        XFlush(dpy);
-        break;
-      case XK_q:
-        goto done;
-      }
-    }
-  }
-done:
-  XFreeGC(dpy, gc);
-  XDestroyWindow(dpy, w);
-  XCloseDisplay(dpy);
+  init_window();
+  init_gc();
+  event_loop();
+  cleanup();
   return 0;
 }

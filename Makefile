@@ -12,6 +12,7 @@ run: ${TARGET}
 
 ${TARGET}: ${OBJ}
 	${CC} -o $@ $^ ${LFLAGS}
+
 %.o: %.c
 	${CC} ${CFLAGS} -c $< -o $@
 
