@@ -8,7 +8,7 @@ OBJ = ${SRC:.c=.o}
 all: ${TARGET}
 
 run: ${TARGET}
-	./${TARGET}
+	./${TARGET} testfile
 
 ${TARGET}: ${OBJ}
 	${CC} -o $@ $^ ${LFLAGS}
