@@ -25,7 +25,7 @@ init_window(void)
   black = BlackPixel(dpy, scr_no);
   white = WhitePixel(dpy, scr_no);
   w = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 500, 400, 0, white, white);
-  XSelectInput(dpy, w, KeyPressMask | StructureNotifyMask);
+  XSelectInput(dpy, w, KeyPressMask | ExposureMask | StructureNotifyMask);
   XMapWindow(dpy, w);
 }
 
@@ -67,43 +67,63 @@ handle_ctrl(KeySym key_sym)
 }
 
 void
+delete_at_point(int x, int y, int font_width)
+{
+  XClearArea(dpy, w, x, y - 2 * font_width, 2 * font_width, 4 * font_width, False);
+}
+
+void
+draw_cursor(int x, int y, int font_width)
+{
+  XFillRectangle(dpy, w, gc, x, y - 2 * font_width, font_width, 2 * font_width);
+}
+
+void
 event_loop(void)
 {
   XEvent e;
   KeySym key_sym;
   XKeyEvent *key_event;
   char buf[32];
-  int len, width, x, y;
+  int len, font_width, step, x, y;
 
-  width = init_font();
-  x = y = 2 * width;
+  font_width = init_font();
+  x = y = step = 2 * font_width;
   do {
     XNextEvent(dpy, &e);
   } while (e.type != MapNotify);
   while (alive) {
     XNextEvent(dpy, &e);
     switch (e.type) {
+    case Expose:
+      draw_cursor(x, y, font_width);
+      XDrawString(dpy, w, gc, step, step, text_buffer, buf_idx);
+      break;
     case KeyPress:
       key_event = &e.xkey;
       key_sym = XLookupKeysym(key_event, 0);
+      delete_at_point(x, y, font_width);
       if ((key_event->state & ControlMask)) {
         handle_ctrl(key_sym);
       } else {
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
         if (key_sym == XK_Return) {
-          y += 2 * width;
-          x = 2 * width;
+          y += step;
+          x = step;
           text_buffer[buf_idx++] = '\n';
-        } else if (key_sym == XK_BackSpace && x > 2 * width) {
-          x -= width;
-          XClearArea(dpy, w, x, y - 2 * width, width, 3 * width, False);
-          buf_idx -= 1;
+        } else if (key_sym == XK_BackSpace) {
+          if (x > step) {
+            x -= font_width;
+            delete_at_point(x, y, font_width);
+            buf_idx -= 1;
+          }
         } else if (len > 0) {
           memcpy(text_buffer + buf_idx, buf, len);
           buf_idx += len;
           XDrawString(dpy, w, gc, x, y, buf, len);
-          x += width;
+          x += font_width;
         }
+        draw_cursor(x, y, font_width);
         XFlush(dpy);
       }
       break;
