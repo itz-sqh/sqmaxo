@@ -13,6 +13,7 @@ int black, white;
 int alive = 1;
 char text_buffer[1024];
 int buf_len = 0, cursor = 0;
+int x, y, font_width, step;
 FILE *file;
 
 void
@@ -41,7 +42,7 @@ init_font(void)
 {
   Font fnt;
   XFontStruct *fs;
-  const char *fontname = "fixed";
+  const char *fontname = "10x20";
 
   fnt = XLoadFont(dpy, fontname);
   XSetFont(dpy, gc, fnt);
@@ -50,8 +51,41 @@ init_font(void)
 }
 
 void
+redraw(void)
+{
+  int x_ = step, y_ = step, i;
+
+  XClearWindow(dpy, w);
+  for (i = 0; i < buf_len; ++i) {
+    if (text_buffer[i] == '\n') {
+      y_ += step;
+      x_ = step;
+    } else {
+      XDrawString(dpy, w, gc, x_, y_, &text_buffer[i], 1);
+      x_ += font_width;
+    }
+  }
+}
+
+void
+delete_at_point(void)
+{
+  XClearArea(dpy, w, x, y - 2 * font_width, 2 * font_width, 4 * font_width, False);
+}
+
+void
+draw_cursor(void)
+{
+  XFillRectangle(dpy, w, gc, x, y - 2 * font_width, font_width / 3, 2 * font_width);
+}
+
+void
 handle_ctrl(KeySym key_sym)
 {
+  int i;
+  int col = 0;
+  int j;
+
   switch (key_sym) {
   case XK_q:
     printf("%.*s\n", buf_len, text_buffer);
@@ -61,37 +95,26 @@ handle_ctrl(KeySym key_sym)
     if ((fwrite(text_buffer, 1, buf_len, file)) <= 0)
       fprintf(stderr, "cannot write to file\n");
     break;
+  case XK_a:
+    for (i = cursor; text_buffer[i] != '\n' && i >= 0; --i)
+      ;
+    cursor = i + 1;
+    x = step;
+    redraw();
+    draw_cursor();
+    break;
+  case XK_e:
+    for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
+      ;
+    cursor = i;
+    for (j = cursor - 1; j >= 0 && text_buffer[j] != '\n'; --j)
+      ++col;
+    x = step + col * font_width;
+    redraw();
+    draw_cursor();
+    break;
   default:
     break;
-  }
-}
-
-void
-delete_at_point(int x, int y, int font_width)
-{
-  XClearArea(dpy, w, x, y - 2 * font_width, 2 * font_width, 4 * font_width, False);
-}
-
-void
-draw_cursor(int x, int y, int font_width)
-{
-  XFillRectangle(dpy, w, gc, x, y - 2 * font_width, font_width / 3, 2 * font_width);
-}
-
-void
-redraw(int font_width, int step)
-{
-  int x = step, y = step, i;
-
-  XClearWindow(dpy, w);
-  for (i = 0; i < buf_len; ++i) {
-    if (text_buffer[i] == '\n') {
-      y += step;
-      x = step;
-    } else {
-      XDrawString(dpy, w, gc, x, y, &text_buffer[i], 1);
-      x += font_width;
-    }
   }
 }
 
@@ -102,7 +125,7 @@ event_loop(void)
   KeySym key_sym;
   XKeyEvent *key_event;
   char buf[32];
-  int len, font_width, step, x, y;
+  int len;
 
   font_width = init_font();
   x = y = step = 2 * font_width;
@@ -113,7 +136,7 @@ event_loop(void)
     XNextEvent(dpy, &e);
     switch (e.type) {
     case Expose:
-      draw_cursor(x, y, font_width);
+      draw_cursor();
       XDrawString(dpy, w, gc, step, step, text_buffer, buf_len);
       break;
     case KeyPress:
@@ -122,19 +145,20 @@ event_loop(void)
       if ((key_event->state & ControlMask)) {
         handle_ctrl(key_sym);
       } else {
-        delete_at_point(x, y, font_width);
+        delete_at_point();
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
         switch (key_sym) {
         case XK_Return:
           y += step;
           x = step;
           text_buffer[buf_len++] = '\n';
+          ++cursor;
           break;
         case XK_BackSpace:
           if (x > step) {
             memmove(text_buffer + cursor - 1, text_buffer + cursor, buf_len - 1);
             x -= font_width;
-            delete_at_point(x, y, font_width);
+            delete_at_point();
             --buf_len;
             --cursor;
           }
@@ -159,8 +183,8 @@ event_loop(void)
             x += font_width;
           }
         }
-        redraw(font_width, step);
-        draw_cursor(x, y, font_width);
+        redraw();
+        draw_cursor();
         XFlush(dpy);
       }
       break;
