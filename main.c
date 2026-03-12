@@ -80,12 +80,50 @@ draw_cursor(void)
 }
 
 void
-handle_ctrl(KeySym key_sym)
+goto_end_of_line(void)
+{
+  int i, j, col = 0;
+
+  for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
+    ;
+  cursor = i;
+  for (j = cursor - 1; j >= 0 && text_buffer[j] != '\n'; --j)
+    ++col;
+  x = step + col * font_width;
+}
+
+void
+goto_start_of_line(void)
 {
   int i;
-  int col = 0;
-  int j;
 
+  for (i = cursor; text_buffer[i] != '\n' && i >= 0; --i)
+    ;
+  cursor = i + 1;
+  x = step;
+}
+
+void
+forward_char(void)
+{
+  if (cursor < buf_len) {
+    ++cursor;
+    x += font_width;
+  }
+}
+
+void
+backward_char(void)
+{
+  if (cursor > 0) {
+    --cursor;
+    x -= font_width;
+  }
+}
+
+void
+handle_ctrl(KeySym key_sym)
+{
   switch (key_sym) {
   case XK_q:
     printf("%.*s\n", buf_len, text_buffer);
@@ -96,26 +134,22 @@ handle_ctrl(KeySym key_sym)
       fprintf(stderr, "cannot write to file\n");
     break;
   case XK_a:
-    for (i = cursor; text_buffer[i] != '\n' && i >= 0; --i)
-      ;
-    cursor = i + 1;
-    x = step;
-    redraw();
-    draw_cursor();
+    goto_start_of_line();
     break;
   case XK_e:
-    for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
-      ;
-    cursor = i;
-    for (j = cursor - 1; j >= 0 && text_buffer[j] != '\n'; --j)
-      ++col;
-    x = step + col * font_width;
-    redraw();
-    draw_cursor();
+    goto_end_of_line();
+    break;
+  case XK_f:
+    forward_char();
+    break;
+  case XK_b:
+    backward_char();
     break;
   default:
     break;
   }
+  redraw();
+  draw_cursor();
 }
 
 void
@@ -126,6 +160,7 @@ event_loop(void)
   XKeyEvent *key_event;
   char buf[32];
   int len;
+  int backline;
 
   font_width = init_font();
   x = y = step = 2 * font_width;
@@ -149,31 +184,36 @@ event_loop(void)
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
         switch (key_sym) {
         case XK_Return:
+          memmove(text_buffer + cursor + 1, text_buffer + cursor, buf_len - cursor);
+          text_buffer[cursor] = '\n';
+          ++buf_len;
+          ++cursor;
           y += step;
           x = step;
-          text_buffer[buf_len++] = '\n';
-          ++cursor;
           break;
         case XK_BackSpace:
-          if (x > step) {
-            memmove(text_buffer + cursor - 1, text_buffer + cursor, buf_len - 1);
-            x -= font_width;
+          if (cursor > 0) {
+            backline = 0;
+            if (text_buffer[cursor - 1] == '\n')
+              backline = 1;
+            memmove(text_buffer + cursor - 1, text_buffer + cursor, buf_len - cursor);
             delete_at_point();
             --buf_len;
             --cursor;
+            if (backline) {
+              y -= step;
+              goto_end_of_line();
+            } else {
+              x -= font_width;
+            }
           }
           break;
         case XK_Left:
-          if (cursor > 0) {
-            --cursor;
-            x -= font_width;
-          }
+          backward_char();
           break;
         case XK_Right:
-          if (cursor < buf_len) {
-            ++cursor;
-            x += font_width;
-          }
+          forward_char();
+          break;
         default:
           if (len > 0) {
             memmove(text_buffer + cursor + len, text_buffer + cursor, buf_len - cursor);
