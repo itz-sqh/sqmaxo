@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 Display *dpy;
 Window w;
 GC gc;
@@ -13,7 +15,7 @@ int black, white;
 int alive = 1;
 char text_buffer[1024];
 int buf_len = 0, cursor = 0;
-int x, y, font_width, step;
+int x, y, font_width, offset;
 FILE *file;
 
 void
@@ -53,13 +55,13 @@ init_font(void)
 void
 redraw(void)
 {
-  int x_ = step, y_ = step, i;
+  int x_ = offset, y_ = offset, i;
 
   XClearWindow(dpy, w);
   for (i = 0; i < buf_len; ++i) {
     if (text_buffer[i] == '\n') {
-      y_ += step;
-      x_ = step;
+      y_ += offset;
+      x_ = offset;
     } else {
       XDrawString(dpy, w, gc, x_, y_, &text_buffer[i], 1);
       x_ += font_width;
@@ -82,25 +84,21 @@ draw_cursor(void)
 void
 goto_end_of_line(void)
 {
-  int i, j, col = 0;
+  int start = cursor;
 
-  for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
-    ;
-  cursor = i;
-  for (j = cursor - 1; j >= 0 && text_buffer[j] != '\n'; --j)
-    ++col;
-  x = step + col * font_width;
+  while (start > 0 && text_buffer[start - 1] != '\n')
+    --start;
+  while (cursor < buf_len && text_buffer[cursor] != '\n')
+    ++cursor;
+  x = offset + (cursor - start) * font_width;
 }
 
 void
 goto_start_of_line(void)
 {
-  int i;
-
-  for (i = cursor; text_buffer[i] != '\n' && i >= 0; --i)
-    ;
-  cursor = i + 1;
-  x = step;
+  while (cursor > 0 && text_buffer[cursor - 1] != '\n')
+    --cursor;
+  x = offset;
 }
 
 void
@@ -115,10 +113,55 @@ forward_char(void)
 void
 backward_char(void)
 {
-  if (cursor > 0) {
+  if (cursor > 0 && text_buffer[cursor - 1] != '\n') {
     --cursor;
     x -= font_width;
   }
+}
+
+void
+prev_line(void)
+{
+  int i = cursor, col, col_cur = 0, col_prev = 0;
+
+  while (i > 0 && text_buffer[i - 1] != '\n') {
+    --i;
+    ++col_cur;
+  }
+  if (i-- == 0)
+    return;
+  while (i > 0 && text_buffer[i - 1] != '\n') {
+    --i;
+    ++col_prev;
+  }
+  col = MIN(col_cur, col_prev);
+  cursor = i + col;
+  y -= offset;
+  x = offset + col * font_width;
+}
+
+void
+down_line(void)
+{
+  int i = cursor, col, col_cur = 0, col_next = 0;
+
+  while (i > 0 && text_buffer[i - 1] != '\n') {
+    --i;
+    ++col_cur;
+  }
+  for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
+    ;
+  if (i++ == buf_len)
+    return;
+  cursor = i;
+  while (i < buf_len && text_buffer[i] != '\n') {
+    ++i;
+    ++col_next;
+  }
+  col = MIN(col_cur, col_next);
+  cursor += col;
+  y += offset;
+  x = offset + col * font_width;
 }
 
 void
@@ -145,6 +188,12 @@ handle_ctrl(KeySym key_sym)
   case XK_b:
     backward_char();
     break;
+  case XK_p:
+    prev_line();
+    break;
+  case XK_n:
+    down_line();
+    break;
   default:
     break;
   }
@@ -163,7 +212,7 @@ event_loop(void)
   int backline;
 
   font_width = init_font();
-  x = y = step = 2 * font_width;
+  x = y = offset = 2 * font_width;
   do {
     XNextEvent(dpy, &e);
   } while (e.type != MapNotify);
@@ -172,7 +221,7 @@ event_loop(void)
     switch (e.type) {
     case Expose:
       draw_cursor();
-      XDrawString(dpy, w, gc, step, step, text_buffer, buf_len);
+      XDrawString(dpy, w, gc, offset, offset, text_buffer, buf_len);
       break;
     case KeyPress:
       key_event = &e.xkey;
@@ -188,8 +237,8 @@ event_loop(void)
           text_buffer[cursor] = '\n';
           ++buf_len;
           ++cursor;
-          y += step;
-          x = step;
+          y += offset;
+          x = offset;
           break;
         case XK_BackSpace:
           if (cursor > 0) {
@@ -201,7 +250,7 @@ event_loop(void)
             --buf_len;
             --cursor;
             if (backline) {
-              y -= step;
+              y -= offset;
               goto_end_of_line();
             } else {
               x -= font_width;
@@ -213,6 +262,12 @@ event_loop(void)
           break;
         case XK_Right:
           forward_char();
+          break;
+        case XK_Up:
+          prev_line();
+          break;
+        case XK_Down:
+          down_line();
           break;
         default:
           if (len > 0) {
