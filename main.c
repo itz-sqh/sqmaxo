@@ -14,6 +14,7 @@
 #define BG_COLOUR "#1f1f1f"
 #define FG_COLOUR "#f1f1f1"
 #define FONTNAME "monospace:size=14"
+#define TABSTOP 2
 
 static Display  *dpy;
 static int       screen;
@@ -28,8 +29,6 @@ static int       width;
 static int       height;
 static int       cw;
 static int       ch;
-static int       x;
-static int       y;
 static int       alive = 1;
 static char      text_buffer[65536];
 static int       buf_len = 0;
@@ -38,8 +37,10 @@ static FILE     *file;
 static char      cur_filename[FILENAME_MAX];
 
 static void init_x(void);
+static void draw_background(void);
+static void draw_cursor(int x, int y);
+static void draw_text(XftColor *colour, int x, int y, const char *text, int len);
 static void draw_buffer(void);
-static void draw_cursor(void);
 static void goto_end_of_line(void);
 static void goto_start_of_line(void);
 static void prev_line(void);
@@ -49,6 +50,7 @@ static void backward_char(void);
 static int  load_from_or_create_file(const char *filename);
 static int  save_to_file(const char *filename);
 static void handle_ctrl(KeySym key_sym);
+static void insert_text(char *text, int len);
 static void event_loop(void);
 
 void
@@ -70,48 +72,66 @@ init_x(void)
     fprintf(stderr, "cannot load font\n");
     exit(1);
   }
-  x = cw = font->max_advance_width;
-  y = ch = font->ascent + font->descent;
+  cw = font->max_advance_width;
+  ch = font->ascent + font->descent;
   XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), FG_COLOUR, &fg_colour);
   XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), BG_COLOUR, &bg_colour);
   XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), CURSOR_COLOUR, &cursor_colour);
 }
 
 void
-draw_buffer(void)
+draw_background(void)
 {
-  int x_ = cw, y_ = ch, i;
-
-  XSetWindowBackground(dpy, w, bg_colour.pixel);
-  XClearWindow(dpy, w);
-  for (i = 0; i < buf_len; ++i) {
-    if (text_buffer[i] == '\n') {
-      y_ += ch;
-      x_ = cw;
-    } else {
-      XftDrawStringUtf8(draw, &fg_colour, font, x_, y_, (FcChar8 *)&text_buffer[i], 1);
-      x_ += cw;
-    }
-  }
+  XSetForeground(dpy, gc, bg_colour.pixel);
+  XFillRectangle(dpy, w, gc, 0, 0, width, height);
 }
 
 void
-draw_cursor(void)
+draw_cursor(int x, int y)
 {
   XSetForeground(dpy, gc, cursor_colour.pixel);
   XFillRectangle(dpy, w, gc, x, y - font->ascent, cw, ch);
 }
 
 void
+draw_text(XftColor *colour, int x, int y, const char *text, int len)
+{
+  if (len > 0)
+    XftDrawStringUtf8(draw, colour, font, x, y, (FcChar8 *)text, len);
+}
+
+void
+draw_buffer(void)
+{
+  int line = 0, cursor_xpos, start = 0, i, len, y;
+
+  draw_background();
+  for (i = 0; i <= buf_len; ++i) {
+    if (i == buf_len || text_buffer[i] == '\n') {
+      len = i - start;
+      y = ch + line * ch;
+      if (cursor >= start && cursor <= i) {
+        cursor_xpos = cursor - start;
+        draw_text(&fg_colour, cw, y, text_buffer + start, cursor_xpos);
+        draw_cursor(cw + cursor_xpos * cw, y);
+        if (cursor_xpos < len) {
+          draw_text(&bg_colour, cw + cursor_xpos * cw, y, text_buffer + start + cursor_xpos, 1);
+          draw_text(&fg_colour, cw + (cursor_xpos + 1) * cw, y, text_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
+        }
+      } else {
+        draw_text(&fg_colour, cw, y, text_buffer + start, len);
+      }
+      start = i + 1;
+      ++line;
+    }
+  }
+}
+
+void
 goto_end_of_line(void)
 {
-  int start = cursor;
-
-  while (start > 0 && text_buffer[start - 1] != '\n')
-    --start;
   while (cursor < buf_len && text_buffer[cursor] != '\n')
     ++cursor;
-  x = cw + (cursor - start) * cw;
 }
 
 void
@@ -119,84 +139,51 @@ goto_start_of_line(void)
 {
   while (cursor > 0 && text_buffer[cursor - 1] != '\n')
     --cursor;
-  x = cw;
 }
 
 void
 prev_line(void)
 {
-  int i = cursor, col, col_cur = 0, col_prev = 0;
+  int i, col_cur = 0, col_prev = 0;
 
-  while (i > 0 && text_buffer[i - 1] != '\n') {
-    --i;
+  for (i = cursor; i > 0 && text_buffer[i - 1] != '\n'; --i)
     ++col_cur;
-  }
   if (i-- == 0)
     return;
-  while (i > 0 && text_buffer[i - 1] != '\n') {
-    --i;
+  for (; i > 0 && text_buffer[i - 1] != '\n'; --i)
     ++col_prev;
-  }
-  col = MIN(col_cur, col_prev);
-  cursor = i + col;
-  y -= ch;
-  x = cw + col * cw;
+  cursor = i + MIN(col_cur, col_prev);
 }
 
 void
 next_line(void)
 {
-  int i = cursor, col, col_cur = 0, col_next = 0;
+  int i, col_cur = 0, col_next = 0;
 
-  while (i > 0 && text_buffer[i - 1] != '\n') {
-    --i;
+  for (i = cursor; i > 0 && text_buffer[i - 1] != '\n'; --i)
     ++col_cur;
-  }
   for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
     ;
   if (i++ == buf_len)
     return;
   cursor = i;
-  while (i < buf_len && text_buffer[i] != '\n') {
-    ++i;
+  for (; i < buf_len && text_buffer[i] != '\n'; ++i)
     ++col_next;
-  }
-  col = MIN(col_cur, col_next);
-  cursor += col;
-  y += ch;
-  x = cw + col * cw;
+  cursor += MIN(col_cur, col_next);
 }
 
 void
 forward_char(void)
 {
-  if (cursor < buf_len) {
-    if (text_buffer[cursor] == '\n') {
-      y += ch;
-      x = cw;
-    } else {
-      x += cw;
-    }
+  if (cursor < buf_len)
     ++cursor;
-  }
 }
 
 void
 backward_char(void)
 {
-  int col = 0, i;
-
-  if (cursor > 0) {
-    if (text_buffer[cursor - 1] == '\n') {
-      for (i = cursor - 1; i > 0 && text_buffer[i - 1] != '\n'; --i)
-        ++col;
-      y -= ch;
-      x = cw + col * cw;
-    } else {
-      x -= cw;
-    }
+  if (cursor > 0)
     --cursor;
-  }
 }
 
 int
@@ -256,9 +243,25 @@ handle_ctrl(KeySym key_sym)
   case XK_n:
     next_line();
     break;
+  case XK_d:
+    if (cursor < buf_len) {
+      ++cursor;
+      insert_text("", -1);
+    }
+    break;
   default:
     break;
   }
+}
+
+void
+insert_text(char *text, int len)
+{
+  memmove(text_buffer + cursor + len, text_buffer + cursor, buf_len - cursor);
+  if (len > 0)
+    memcpy(text_buffer + cursor, text, len);
+  buf_len += len;
+  cursor += len;
 }
 
 void
@@ -268,8 +271,7 @@ event_loop(void)
   KeySym key_sym;
   XKeyEvent *key_event;
   char buf[32];
-  int len;
-  int backline;
+  int len, i;
 
   do {
     XNextEvent(dpy, &e);
@@ -279,7 +281,6 @@ event_loop(void)
     switch (e.type) {
     case Expose:
       draw_buffer();
-      draw_cursor();
       break;
     case ConfigureNotify:
       width = e.xconfigure.width;
@@ -294,28 +295,15 @@ event_loop(void)
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
         switch (key_sym) {
         case XK_Return:
-          memmove(text_buffer + cursor + 1, text_buffer + cursor, buf_len - cursor);
-          text_buffer[cursor] = '\n';
-          ++buf_len;
-          ++cursor;
-          y += ch;
-          x = cw;
+          insert_text("\n", 1);
+          break;
+        case XK_Tab:
+          for (i = 0; i < TABSTOP; ++i)
+            insert_text(" ", 1);
           break;
         case XK_BackSpace:
-          if (cursor > 0) {
-            backline = 0;
-            if (text_buffer[cursor - 1] == '\n')
-              backline = 1;
-            memmove(text_buffer + cursor - 1, text_buffer + cursor, buf_len - cursor);
-            --buf_len;
-            --cursor;
-            if (backline) {
-              y -= ch;
-              goto_end_of_line();
-            } else {
-              x -= cw;
-            }
-          }
+          if (cursor > 0)
+            insert_text("", -1);
           break;
         case XK_Left:
           backward_char();
@@ -330,18 +318,11 @@ event_loop(void)
           next_line();
           break;
         default:
-          if (len > 0) {
-            memmove(text_buffer + cursor + len, text_buffer + cursor, buf_len - cursor);
-            memcpy(text_buffer + cursor, buf, len);
-            cursor += len;
-            buf_len += len;
-            x += cw;
-          }
+          if (len > 0)
+            insert_text(buf, len);
         }
       }
       draw_buffer();
-      draw_cursor();
-      XFlush(dpy);
       break;
     default:
       break;
