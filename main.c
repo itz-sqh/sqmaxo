@@ -1,5 +1,7 @@
+#include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xft/Xft.h>
 #include <X11/keysym.h>
 
 #include <stdio.h>
@@ -8,63 +10,87 @@
 
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
-Display *dpy;
-Window w;
-GC gc;
-int black, white;
-int alive = 1;
-static char text_buffer[65536], cur_filename[FILENAME_MAX]; /* keep on bss, cur_filename unused for now */
-int buf_len = 0, cursor = 0;
-int x, y, font_width, offset;
-FILE *file;
+#define CURSOR_COLOUR "#676767"
+#define BG_COLOUR "#1f1f1f"
+#define FG_COLOUR "#f1f1f1"
+#define FONTNAME "monospace:size=14"
+
+static Display  *dpy;
+static int       screen;
+static Window    w;
+static GC        gc;
+static XftDraw  *draw;
+static XftFont  *font;
+static XftColor  fg_colour;
+static XftColor  bg_colour;
+static XftColor  cursor_colour;
+static int       width;
+static int       height;
+static int       cw;
+static int       ch;
+static int       x;
+static int       y;
+static int       alive = 1;
+static char      text_buffer[65536];
+static int       buf_len = 0;
+static int       cursor = 0;
+static FILE     *file;
+static char      cur_filename[FILENAME_MAX];
+
+static void init_x(void);
+static void draw_buffer(void);
+static void draw_cursor(void);
+static void goto_end_of_line(void);
+static void goto_start_of_line(void);
+static void prev_line(void);
+static void next_line(void);
+static void forward_char(void);
+static void backward_char(void);
+static int  load_from_or_create_file(const char *filename);
+static int  save_to_file(const char *filename);
+static void handle_ctrl(KeySym key_sym);
+static void event_loop(void);
 
 void
-init_window(void)
+init_x(void)
 {
-  int scr_no;
-
-  dpy = XOpenDisplay(NULL);
-  scr_no = DefaultScreen(dpy);
-  black = BlackPixel(dpy, scr_no);
-  white = WhitePixel(dpy, scr_no);
-  w = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 500, 400, 0, white, white);
-  XSelectInput(dpy, w, KeyPressMask | ExposureMask | StructureNotifyMask);
+  if ((dpy = XOpenDisplay(NULL)) == NULL) {
+    fprintf(stderr, "cannot open display\n");
+    exit(1);
+  }
+  screen = DefaultScreen(dpy);
+  width = 800;
+  height = 600;
+  w = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0, width, height, 0, 0, 0);
+  XSelectInput(dpy, w, ExposureMask | KeyPressMask | StructureNotifyMask);
   XMapWindow(dpy, w);
-}
-
-void
-init_gc(void)
-{
   gc = XCreateGC(dpy, w, 0, NULL);
-  XSetForeground(dpy, gc, black);
-}
-
-int
-init_font(void)
-{
-  Font fnt;
-  XFontStruct *fs;
-  const char *fontname = "fixed";
-
-  fnt = XLoadFont(dpy, fontname);
-  XSetFont(dpy, gc, fnt);
-  fs = XLoadQueryFont(dpy, fontname);
-  return XTextWidth(fs, "W", 1);
+  draw = XftDrawCreate(dpy, w, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen));
+  if ((font = XftFontOpenName(dpy, screen, FONTNAME)) == NULL) {
+    fprintf(stderr, "cannot load font\n");
+    exit(1);
+  }
+  x = cw = font->max_advance_width;
+  y = ch = font->ascent + font->descent;
+  XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), FG_COLOUR, &fg_colour);
+  XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), BG_COLOUR, &bg_colour);
+  XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), CURSOR_COLOUR, &cursor_colour);
 }
 
 void
-redraw_buffer(void)
+draw_buffer(void)
 {
-  int x_ = offset, y_ = offset, i;
+  int x_ = cw, y_ = ch, i;
 
+  XSetWindowBackground(dpy, w, bg_colour.pixel);
   XClearWindow(dpy, w);
   for (i = 0; i < buf_len; ++i) {
     if (text_buffer[i] == '\n') {
-      y_ += offset;
-      x_ = offset;
+      y_ += ch;
+      x_ = cw;
     } else {
-      XDrawString(dpy, w, gc, x_, y_, &text_buffer[i], 1);
-      x_ += font_width;
+      XftDrawStringUtf8(draw, &fg_colour, font, x_, y_, (FcChar8 *)&text_buffer[i], 1);
+      x_ += cw;
     }
   }
 }
@@ -72,7 +98,8 @@ redraw_buffer(void)
 void
 draw_cursor(void)
 {
-  XFillRectangle(dpy, w, gc, x, y - offset, font_width / 3, 2 * font_width);
+  XSetForeground(dpy, gc, cursor_colour.pixel);
+  XFillRectangle(dpy, w, gc, x, y - font->ascent, cw, ch);
 }
 
 void
@@ -84,7 +111,7 @@ goto_end_of_line(void)
     --start;
   while (cursor < buf_len && text_buffer[cursor] != '\n')
     ++cursor;
-  x = offset + (cursor - start) * font_width;
+  x = cw + (cursor - start) * cw;
 }
 
 void
@@ -92,7 +119,7 @@ goto_start_of_line(void)
 {
   while (cursor > 0 && text_buffer[cursor - 1] != '\n')
     --cursor;
-  x = offset;
+  x = cw;
 }
 
 void
@@ -112,8 +139,8 @@ prev_line(void)
   }
   col = MIN(col_cur, col_prev);
   cursor = i + col;
-  y -= offset;
-  x = offset + col * font_width;
+  y -= ch;
+  x = cw + col * cw;
 }
 
 void
@@ -136,8 +163,8 @@ next_line(void)
   }
   col = MIN(col_cur, col_next);
   cursor += col;
-  y += offset;
-  x = offset + col * font_width;
+  y += ch;
+  x = cw + col * cw;
 }
 
 void
@@ -145,10 +172,10 @@ forward_char(void)
 {
   if (cursor < buf_len) {
     if (text_buffer[cursor] == '\n') {
-      y += offset;
-      x = offset;
+      y += ch;
+      x = cw;
     } else {
-      x += font_width;
+      x += cw;
     }
     ++cursor;
   }
@@ -163,10 +190,10 @@ backward_char(void)
     if (text_buffer[cursor - 1] == '\n') {
       for (i = cursor - 1; i > 0 && text_buffer[i - 1] != '\n'; --i)
         ++col;
-      y -= offset;
-      x = offset + col * font_width;
+      y -= ch;
+      x = cw + col * cw;
     } else {
-      x -= font_width;
+      x -= cw;
     }
     --cursor;
   }
@@ -244,8 +271,6 @@ event_loop(void)
   int len;
   int backline;
 
-  font_width = init_font();
-  x = y = offset = 2 * font_width;
   do {
     XNextEvent(dpy, &e);
   } while (e.type != MapNotify);
@@ -253,8 +278,12 @@ event_loop(void)
     XNextEvent(dpy, &e);
     switch (e.type) {
     case Expose:
-      redraw_buffer();
+      draw_buffer();
       draw_cursor();
+      break;
+    case ConfigureNotify:
+      width = e.xconfigure.width;
+      height = e.xconfigure.height;
       break;
     case KeyPress:
       key_event = &e.xkey;
@@ -269,8 +298,8 @@ event_loop(void)
           text_buffer[cursor] = '\n';
           ++buf_len;
           ++cursor;
-          y += offset;
-          x = offset;
+          y += ch;
+          x = cw;
           break;
         case XK_BackSpace:
           if (cursor > 0) {
@@ -281,10 +310,10 @@ event_loop(void)
             --buf_len;
             --cursor;
             if (backline) {
-              y -= offset;
+              y -= ch;
               goto_end_of_line();
             } else {
-              x -= font_width;
+              x -= cw;
             }
           }
           break;
@@ -306,11 +335,11 @@ event_loop(void)
             memcpy(text_buffer + cursor, buf, len);
             cursor += len;
             buf_len += len;
-            x += font_width;
+            x += cw;
           }
         }
       }
-      redraw_buffer();
+      draw_buffer();
       draw_cursor();
       XFlush(dpy);
       break;
@@ -318,14 +347,6 @@ event_loop(void)
       break;
     }
   }
-}
-
-void
-cleanup(void)
-{
-  XFreeGC(dpy, gc);
-  XDestroyWindow(dpy, w);
-  XCloseDisplay(dpy);
 }
 
 int
@@ -340,9 +361,7 @@ main(int argc, char *argv[])
     fprintf(stderr, "cannot open %s\n", cur_filename);
     exit(1);
   }
-  init_window();
-  init_gc();
+  init_x();
   event_loop();
-  cleanup();
   return 0;
 }

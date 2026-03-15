@@ -1,6 +1,6 @@
 CC = clang
-CFLAGS = -std=c99 -Wall -Wextra -Wpedantic ${shell pkg-config --cflags x11}
-LFLAGS = ${shell pkg-config --libs x11}
+CFLAGS = -std=c99 -Wall -Wextra -Wpedantic ${shell pkg-config --cflags x11 xft}
+LFLAGS = ${shell pkg-config --libs x11 xft}
 TARGET = a.out
 SRC = main.c
 OBJ = ${SRC:.c=.o}
