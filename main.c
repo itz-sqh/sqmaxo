@@ -36,7 +36,7 @@ static int       alive = 1;
 static char      text_buffer[65536];
 static int       buf_len = 0;
 static int       cursor = 0;
-static FILE     *file;
+static int       scroll_offset = 0;
 static char      cur_filename[FILENAME_MAX];
 static char      tab_buffer[32];
 
@@ -47,12 +47,13 @@ static void draw_text(XftColor *colour, int x, int y, const char *text, int len)
 static void draw_buffer(void);
 static void goto_end_of_line(void);
 static void goto_start_of_line(void);
+static void ensure_cursor_visible(void);
 static void prev_line(void);
 static void next_line(void);
 static void forward_char(void);
 static void backward_char(void);
-static int  load_from_or_create_file(const char *filename);
-static int  save_to_file(const char *filename);
+static void load_or_create_file(void);
+static void save_to_file(void);
 static void handle_ctrl(KeySym key_sym);
 static void handle_meta(KeySym key_sym);
 static void insert_text(char *text, int len);
@@ -108,26 +109,27 @@ draw_text(XftColor *colour, int x, int y, const char *text, int len)
 void
 draw_buffer(void)
 {
-  int line = 0, cursor_xpos, start = 0, i, len, y;
+  int cursor_ypos = 0, cursor_xpos, start = 0, i, len, y;
 
   draw_background();
   for (i = 0; i <= buf_len; ++i) {
     if (i == buf_len || text_buffer[i] == '\n') {
       len = i - start;
-      y = ch + line * ch;
-      if (cursor >= start && cursor <= i) {
-        cursor_xpos = cursor - start;
-        draw_text(&fg_colour, cw, y, text_buffer + start, cursor_xpos);
-        draw_cursor(cw + cursor_xpos * cw, y);
-        if (cursor_xpos < len) {
-          draw_text(&bg_colour, cw + cursor_xpos * cw, y, text_buffer + start + cursor_xpos, 1);
-          draw_text(&fg_colour, cw + (cursor_xpos + 1) * cw, y, text_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
+      if ((y = ch + (cursor_ypos - scroll_offset) * ch) >= 0 && y <= height) {
+        if (cursor >= start && cursor <= i) {
+            cursor_xpos = cursor - start;
+            draw_text(&fg_colour, cw, y, text_buffer + start, cursor_xpos);
+            draw_cursor(cw + cursor_xpos * cw, y);
+            if (cursor_xpos < len) {
+            draw_text(&bg_colour, cw + cursor_xpos * cw, y, text_buffer + start + cursor_xpos, 1);
+            draw_text(&fg_colour, cw + (cursor_xpos + 1) * cw, y, text_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
+            }
+        } else {
+            draw_text(&fg_colour, cw, y, text_buffer + start, len);
         }
-      } else {
-        draw_text(&fg_colour, cw, y, text_buffer + start, len);
       }
       start = i + 1;
-      ++line;
+      ++cursor_ypos;
     }
   }
 }
@@ -147,6 +149,21 @@ goto_start_of_line(void)
 }
 
 void
+ensure_cursor_visible(void)
+{
+  int i, cursor_ypos = 0;
+
+  for (i = 0; i < cursor; ++i) {
+    if (text_buffer[i] == '\n')
+        ++cursor_ypos;
+  }
+  if (cursor_ypos < scroll_offset)
+    scroll_offset = cursor_ypos;
+  else if (cursor_ypos >= scroll_offset + height / ch)
+    scroll_offset = cursor_ypos - height / ch + 1;
+}
+
+void
 prev_line(void)
 {
   int i, col_cur = 0, col_prev = 0;
@@ -158,6 +175,7 @@ prev_line(void)
   for (; i > 0 && text_buffer[i - 1] != '\n'; --i)
     ++col_prev;
   cursor = i + MIN(col_cur, col_prev);
+  ensure_cursor_visible();
 }
 
 void
@@ -175,6 +193,7 @@ next_line(void)
   for (; i < buf_len && text_buffer[i] != '\n'; ++i)
     ++col_next;
   cursor += MIN(col_cur, col_next);
+  ensure_cursor_visible();
 }
 
 void
@@ -191,45 +210,52 @@ backward_char(void)
     --cursor;
 }
 
-int
-load_from_or_create_file(const char *filename)
+void
+load_or_create_file(void)
 {
-  if ((file = fopen(filename, "r")) == NULL) {
-    if ((file = fopen(filename, "w")) == NULL)
-      return 0;
+  FILE *fp;
+
+  if ((fp = fopen(cur_filename, "r")) == NULL) {
+    if ((fp = fopen(cur_filename, "w+")) == NULL) {
+      fprintf(stderr, "could not create \"%s\"\n", cur_filename);
+      exit(1);
+    }
   } else {
-    fseek(file, 0, SEEK_END);
-    buf_len = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    fread(text_buffer, 1, buf_len, file);
+    fseek(fp, 0, SEEK_END);
+    buf_len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    fread(text_buffer, 1, buf_len, fp);
   }
-  fclose(file);
-  return 1;
+  fclose(fp);
 }
 
-int
-save_to_file(const char *filename)
+void
+save_to_file(void)
 {
-  if ((file = fopen(filename, "w")) == NULL)
-    return 0;
-  if (fwrite(text_buffer, 1, buf_len, file) <= 0)
-    return 0;
-  fclose(file);
-  return 1;
+  FILE *fp;
+
+  if ((fp = fopen(cur_filename, "w")) == NULL) {
+    fprintf(stderr, "could not open \"%s\"\n", cur_filename);
+    exit(1);
+  }
+  if (fwrite(text_buffer, 1, buf_len, fp) <= 0) {
+    fprintf(stderr, "could not write to \"%s\"\n", cur_filename);
+    exit(1);
+  }
+  fclose(fp);
 }
 
 void
 handle_ctrl(KeySym key_sym)
 {
-  int start, len;
+  int start, len, i;
 
   switch (key_sym) {
   case XK_q:
     alive = 0;
     break;
   case XK_s:
-    if (save_to_file(cur_filename) == 0)
-      fprintf(stderr, "cannot write to file\n");
+    save_to_file();
     break;
   case XK_a:
     goto_start_of_line();
@@ -266,6 +292,11 @@ handle_ctrl(KeySym key_sym)
       len = cursor - start;
       insert_text(NULL, -len);
     }
+    break;
+  case XK_v:
+    for (i = 0; i < height / ch; ++i)
+      next_line();
+    break;
   default:
     break;
   }
@@ -274,7 +305,7 @@ handle_ctrl(KeySym key_sym)
 void
 handle_meta(KeySym key_sym)
 {
-  int start, len;
+  int start, len, i;
 
   switch (key_sym) {
   case XK_f:
@@ -297,6 +328,10 @@ handle_meta(KeySym key_sym)
       ++cursor;
     len = cursor - start;
     insert_text(NULL, -len);
+    break;
+  case XK_v:
+    for (i = 0; i < height / ch; ++i)
+      prev_line();
     break;
   case XK_BackSpace:
     start = cursor;
@@ -390,18 +425,16 @@ event_loop(void)
   }
 }
 
-int
+  int
 main(int argc, char *argv[])
 {
   if (argc != 2) {
     fprintf(stderr, "missing file name\n");
     return 1;
   }
-  strcpy(cur_filename, argv[1]);
-  if ((load_from_or_create_file(cur_filename)) == 0) {
-    fprintf(stderr, "cannot open %s\n", cur_filename);
-    exit(1);
-  }
+  strncpy(cur_filename, argv[1], FILENAME_MAX - 1);
+  cur_filename[FILENAME_MAX - 1] = '\0';
+  load_or_create_file();
   memset(tab_buffer, ' ', 32);
   init_x();
   event_loop();
