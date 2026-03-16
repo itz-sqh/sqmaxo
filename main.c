@@ -62,6 +62,8 @@ static void event_loop(void);
 void
 init_x(void)
 {
+  XGlyphInfo extents;
+
   if ((dpy = XOpenDisplay(NULL)) == NULL) {
     fprintf(stderr, "cannot open display\n");
     exit(1);
@@ -78,7 +80,8 @@ init_x(void)
     fprintf(stderr, "cannot load font\n");
     exit(1);
   }
-  cw = font->max_advance_width;
+  XftTextExtentsUtf8(dpy, font, (FcChar8 *)"W", 1, &extents);
+  cw = extents.xOff;
   ch = font->ascent + font->descent;
   XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), FG_COLOUR, &fg_colour);
   XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), BG_COLOUR, &bg_colour);
@@ -117,15 +120,15 @@ draw_buffer(void)
       len = i - start;
       if ((y = ch + (cursor_ypos - scroll_offset) * ch) >= 0 && y <= height) {
         if (cursor >= start && cursor <= i) {
-            cursor_xpos = cursor - start;
-            draw_text(&fg_colour, cw, y, text_buffer + start, cursor_xpos);
-            draw_cursor(cw + cursor_xpos * cw, y);
-            if (cursor_xpos < len) {
+          cursor_xpos = cursor - start;
+          draw_text(&fg_colour, cw, y, text_buffer + start, cursor_xpos);
+          draw_cursor(cw + cursor_xpos * cw, y);
+          if (cursor_xpos < len) {
             draw_text(&bg_colour, cw + cursor_xpos * cw, y, text_buffer + start + cursor_xpos, 1);
             draw_text(&fg_colour, cw + (cursor_xpos + 1) * cw, y, text_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
-            }
+          }
         } else {
-            draw_text(&fg_colour, cw, y, text_buffer + start, len);
+          draw_text(&fg_colour, cw, y, text_buffer + start, len);
         }
       }
       start = i + 1;
@@ -155,7 +158,7 @@ ensure_cursor_visible(void)
 
   for (i = 0; i < cursor; ++i) {
     if (text_buffer[i] == '\n')
-        ++cursor_ypos;
+      ++cursor_ypos;
   }
   if (cursor_ypos < scroll_offset)
     scroll_offset = cursor_ypos;
@@ -425,7 +428,7 @@ event_loop(void)
   }
 }
 
-  int
+int
 main(int argc, char *argv[])
 {
   if (argc != 2) {
