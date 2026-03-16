@@ -7,8 +7,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
+#define ALT_MASK 8192
 
 #define CURSOR_COLOUR "#676767"
 #define BG_COLOUR "#1f1f1f"
@@ -35,6 +38,7 @@ static int       buf_len = 0;
 static int       cursor = 0;
 static FILE     *file;
 static char      cur_filename[FILENAME_MAX];
+static char      tab_buffer[32];
 
 static void init_x(void);
 static void draw_background(void);
@@ -50,6 +54,7 @@ static void backward_char(void);
 static int  load_from_or_create_file(const char *filename);
 static int  save_to_file(const char *filename);
 static void handle_ctrl(KeySym key_sym);
+static void handle_meta(KeySym key_sym);
 static void insert_text(char *text, int len);
 static void event_loop(void);
 
@@ -216,9 +221,10 @@ save_to_file(const char *filename)
 void
 handle_ctrl(KeySym key_sym)
 {
+  int start, len;
+
   switch (key_sym) {
   case XK_q:
-    printf("%.*s\n", buf_len, text_buffer);
     alive = 0;
     break;
   case XK_s:
@@ -246,8 +252,61 @@ handle_ctrl(KeySym key_sym)
   case XK_d:
     if (cursor < buf_len) {
       ++cursor;
-      insert_text("", -1);
+      insert_text(NULL, -1);
     }
+    break;
+  case XK_k:
+    if (cursor < buf_len && text_buffer[cursor] == '\n') {
+      ++cursor;
+      insert_text(NULL, -1);
+    } else {
+      start = cursor;
+      while (cursor < buf_len && text_buffer[cursor] != '\n')
+        ++cursor;
+      len = cursor - start;
+      insert_text(NULL, -len);
+    }
+  default:
+    break;
+  }
+}
+
+void
+handle_meta(KeySym key_sym)
+{
+  int start, len;
+
+  switch (key_sym) {
+  case XK_f:
+    while (cursor < buf_len && isspace(text_buffer[cursor]))
+      ++cursor;
+    while (cursor < buf_len && !isspace(text_buffer[cursor]))
+      ++cursor;
+    break;
+  case XK_b:
+    while (cursor > 0 && isspace(text_buffer[cursor - 1]))
+      --cursor;
+    while (cursor > 0 && !isspace(text_buffer[cursor - 1]))
+      --cursor;
+    break;
+  case XK_d:
+    start = cursor;
+    while (cursor < buf_len && isspace(text_buffer[cursor]))
+      ++cursor;
+    while (cursor < buf_len && !isspace(text_buffer[cursor]))
+      ++cursor;
+    len = cursor - start;
+    insert_text(NULL, -len);
+    break;
+  case XK_BackSpace:
+    start = cursor;
+    while (cursor > 0 && isspace(text_buffer[cursor - 1]))
+      --cursor;
+    while (cursor > 0 && !isspace(text_buffer[cursor - 1]))
+      --cursor;
+    len = start - cursor;
+    cursor = start;
+    insert_text(NULL, -len);
     break;
   default:
     break;
@@ -258,7 +317,7 @@ void
 insert_text(char *text, int len)
 {
   memmove(text_buffer + cursor + len, text_buffer + cursor, buf_len - cursor);
-  if (len > 0)
+  if (text != NULL)
     memcpy(text_buffer + cursor, text, len);
   buf_len += len;
   cursor += len;
@@ -271,7 +330,7 @@ event_loop(void)
   KeySym key_sym;
   XKeyEvent *key_event;
   char buf[32];
-  int len, i;
+  int len;
 
   do {
     XNextEvent(dpy, &e);
@@ -289,8 +348,10 @@ event_loop(void)
     case KeyPress:
       key_event = &e.xkey;
       key_sym = XLookupKeysym(key_event, 0);
-      if ((key_event->state & ControlMask)) {
+      if (key_event->state & ControlMask) {
         handle_ctrl(key_sym);
+      } else if (key_event->state & (Mod1Mask | ALT_MASK)) {
+        handle_meta(key_sym);
       } else {
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
         switch (key_sym) {
@@ -298,12 +359,11 @@ event_loop(void)
           insert_text("\n", 1);
           break;
         case XK_Tab:
-          for (i = 0; i < TABSTOP; ++i)
-            insert_text(" ", 1);
+          insert_text(tab_buffer, TABSTOP);
           break;
         case XK_BackSpace:
           if (cursor > 0)
-            insert_text("", -1);
+            insert_text(NULL, -1);
           break;
         case XK_Left:
           backward_char();
@@ -342,6 +402,7 @@ main(int argc, char *argv[])
     fprintf(stderr, "cannot open %s\n", cur_filename);
     exit(1);
   }
+  memset(tab_buffer, ' ', 32);
   init_x();
   event_loop();
   return 0;
