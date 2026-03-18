@@ -9,6 +9,9 @@
 #include <string.h>
 #include <ctype.h>
 
+#define SQBUF_IMPLEMENTATION
+#include "sqbuf.h"
+
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
 #define ALT_MASK 8192
@@ -18,30 +21,34 @@
 #define FG_COLOUR "#f1f1f1"
 #define FONTNAME "monospace:size=14"
 #define TABSTOP 2
+#define MAX_BUF_LEN 65536
 
-static Display  *dpy;
-static int       screen;
-static Window    w;
-static GC        gc;
-static XftDraw  *draw;
-static XftFont  *font;
-static XftColor  fg_colour;
-static XftColor  bg_colour;
-static XftColor  cursor_colour;
-static int       width;
-static int       height;
-static int       loff;
-static int       cw;
-static int       ch;
-static int       alive = 1;
-static char      text_buffer[65536];
-static int       buf_len = 0;
-static int       buf_lines;
-static int       cursor = 0;
-static int       scroll_offset = 0;
-static char      cur_filename[FILENAME_MAX];
-static char      tab_buffer[32];
+static Display		*dpy;
+static int		 screen;
+static Window		 w;
+static GC		 gc;
+static XftDraw		*draw;
+static XftFont		*font;
+static XftColor		 fg_colour;
+static XftColor		 bg_colour;
+static XftColor		 cursor_colour;
+static int		 width;
+static int		 height;
+static int		 loff;
+static int		 cw;
+static int		 ch;
+static int		 alive	       = 1;
+static int		 buf_len       = 0;
+static int		 buf_lines;
+static sq_buffer*	 text_buffer   = NULL;
+static int		 cursor	       = 0;
+static int		 scroll_offset = 0;
+static char		 cur_filename[FILENAME_MAX];
+static char		 tab_buffer[32];
+static char		 display_buffer[MAX_BUF_LEN + 1];
 
+
+static void update_display_buffer(void);
 static void init_x(void);
 static void count_lines(void);
 static void draw_background(void);
@@ -61,7 +68,14 @@ static void save_to_file(void);
 static void handle_ctrl(KeySym key_sym);
 static void handle_meta(int state, KeySym key_sym);
 static void insert_text(char *text, int len);
+static void delete_text(int count);
 static void event_loop(void);
+
+static void update_display_buffer(void) {
+  if (!text_buffer) return;
+  // assuming display_buffer is large enough
+  buffer_get_all(text_buffer, display_buffer);
+}
 
 void
 init_x(void)
@@ -96,11 +110,12 @@ void
 count_lines(void)
 {
   int i, digits = 0;
+  buf_len = sq_buffer_length(text_buffer);
 
   loff = cw;
   buf_lines = 1;
   for (i = 0; i < buf_len; ++i) {
-    if (text_buffer[i] == '\n')
+    if (buffer_at(text_buffer, i) == '\n')
       ++buf_lines;
   }
   for (i = buf_lines; i != 0; i /= 10)
@@ -132,12 +147,15 @@ draw_text(XftColor *colour, int x, int y, const char *text, int len)
 void
 draw_buffer(void)
 {
+  buf_len = sq_buffer_length(text_buffer);
+  update_display_buffer();
   int cursor_ypos = 0, cursor_xpos, start = 0, i, len, y, lineno_len;
   char lineno_str[32];
 
   draw_background();
   for (i = 0; i <= buf_len; ++i) {
-    if (i == buf_len || text_buffer[i] == '\n') {
+  
+    if (i == buf_len || display_buffer[i] == '\n') {
       len = i - start;
       if ((y = ch + (cursor_ypos - scroll_offset) * ch) >= 0 && y <= height) {
         lineno_len = snprintf(lineno_str, 32, "%d ", cursor_ypos);
@@ -145,14 +163,14 @@ draw_buffer(void)
         draw_text(&fg_colour, loff - (cw * lineno_len), y, lineno_str, lineno_len);
         if (cursor >= start && cursor <= i) {
           cursor_xpos = cursor - start;
-          draw_text(&fg_colour, loff, y, text_buffer + start, cursor_xpos);
+          draw_text(&fg_colour, loff, y, display_buffer + start, cursor_xpos);
           draw_cursor(loff + cursor_xpos * cw, y);
           if (cursor_xpos < len) {
-            draw_text(&bg_colour, loff + cursor_xpos * cw, y, text_buffer + start + cursor_xpos, 1);
-            draw_text(&fg_colour, loff + (cursor_xpos + 1) * cw, y, text_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
+            draw_text(&bg_colour, loff + cursor_xpos * cw, y, display_buffer + start + cursor_xpos, 1);
+            draw_text(&fg_colour, loff + (cursor_xpos + 1) * cw, y, display_buffer + start + cursor_xpos + 1, len - cursor_xpos - 1);
           }
         } else {
-          draw_text(&fg_colour, loff, y, text_buffer + start, len);
+          draw_text(&fg_colour, loff, y, display_buffer + start, len);
         }
       }
       start = i + 1;
@@ -165,9 +183,9 @@ void
 goto_line(int lineno)
 {
   int i, line = 1;
-
+  buf_len = sq_buffer_length(text_buffer);
   for (i = 0; i < buf_len && line != lineno; ++i) {
-    if (text_buffer[i] == '\n')
+    if (buffer_at(text_buffer, i) == '\n')
       ++line;
   }
   cursor = i;
@@ -176,14 +194,15 @@ goto_line(int lineno)
 void
 goto_end_of_line(void)
 {
-  while (cursor < buf_len && text_buffer[cursor] != '\n')
+  buf_len = sq_buffer_length(text_buffer);
+  while (cursor < buf_len && buffer_at(text_buffer, cursor) != '\n')
     ++cursor;
 }
 
 void
 goto_start_of_line(void)
 {
-  while (cursor > 0 && text_buffer[cursor - 1] != '\n')
+  while (cursor > 0 && buffer_at(text_buffer, cursor - 1) != '\n')
     --cursor;
 }
 
@@ -193,7 +212,7 @@ ensure_cursor_visible(void)
   int i, cursor_ypos = 0;
 
   for (i = 0; i < cursor; ++i) {
-    if (text_buffer[i] == '\n')
+    if (buffer_at(text_buffer, i) == '\n')
       ++cursor_ypos;
   }
   if (cursor_ypos < scroll_offset)
@@ -207,11 +226,11 @@ prev_line(void)
 {
   int i, col_cur = 0, col_prev = 0;
 
-  for (i = cursor; i > 0 && text_buffer[i - 1] != '\n'; --i)
+  for (i = cursor; i > 0 && buffer_at(text_buffer, i - 1) != '\n'; --i)
     ++col_cur;
   if (i-- == 0)
     return;
-  for (; i > 0 && text_buffer[i - 1] != '\n'; --i)
+  for (; i > 0 && buffer_at(text_buffer, i - 1) != '\n'; --i)
     ++col_prev;
   cursor = i + MIN(col_cur, col_prev);
   ensure_cursor_visible();
@@ -221,15 +240,16 @@ void
 next_line(void)
 {
   int i, col_cur = 0, col_next = 0;
+  buf_len = sq_buffer_length(text_buffer);
 
-  for (i = cursor; i > 0 && text_buffer[i - 1] != '\n'; --i)
+  for (i = cursor; i > 0 && buffer_at(text_buffer, i - 1) != '\n'; --i)
     ++col_cur;
-  for (i = cursor; i < buf_len && text_buffer[i] != '\n'; ++i)
+  for (i = cursor; i < buf_len && buffer_at(text_buffer, i) != '\n'; ++i)
     ;
   if (i++ == buf_len)
     return;
   cursor = i;
-  for (; i < buf_len && text_buffer[i] != '\n'; ++i)
+  for (; i < buf_len && buffer_at(text_buffer, i) != '\n'; ++i)
     ++col_next;
   cursor += MIN(col_cur, col_next);
   ensure_cursor_visible();
@@ -238,6 +258,7 @@ next_line(void)
 void
 forward_char(void)
 {
+  buf_len = sq_buffer_length(text_buffer);
   if (cursor < buf_len)
     ++cursor;
 }
@@ -252,20 +273,16 @@ backward_char(void)
 void
 load_or_create_file(void)
 {
-  FILE *fp;
-
-  if ((fp = fopen(cur_filename, "r")) == NULL) {
-    if ((fp = fopen(cur_filename, "w+")) == NULL) {
-      fprintf(stderr, "could not create \"%s\"\n", cur_filename);
+  text_buffer = sq_buffer_create_from_file(cur_filename);
+  if (!text_buffer) {
+    text_buffer = sq_buffer_create();
+    if (!text_buffer) {
+      fprintf(stderr, "could not create buffer\n");
       exit(1);
     }
-  } else {
-    fseek(fp, 0, SEEK_END);
-    buf_len = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    fread(text_buffer, 1, buf_len, fp);
   }
-  fclose(fp);
+  cursor = 0;
+  scroll_offset = 0;
 }
 
 void
@@ -277,7 +294,8 @@ save_to_file(void)
     fprintf(stderr, "could not open \"%s\"\n", cur_filename);
     exit(1);
   }
-  if (fwrite(text_buffer, 1, buf_len, fp) <= 0) {
+  update_display_buffer();
+  if (fwrite(display_buffer, 1, buf_len, fp) <= 0) {
     fprintf(stderr, "could not write to \"%s\"\n", cur_filename);
     exit(1);
   }
@@ -288,6 +306,9 @@ void
 handle_ctrl(KeySym key_sym)
 {
   int start, len, i;
+  int prev_len = sq_buffer_length(text_buffer);
+  int prev_cursor = cursor;
+
 
   switch (key_sym) {
   case XK_q:
@@ -295,6 +316,23 @@ handle_ctrl(KeySym key_sym)
     break;
   case XK_s:
     save_to_file();
+    break;
+  case XK_z:
+    if (sq_buffer_undo(text_buffer)) {
+      buf_len = sq_buffer_length(text_buffer);
+      cursor = prev_cursor - (prev_len - buf_len);
+      // clamp ?
+      if (cursor < 0) cursor = 0;
+      if (cursor > buf_len) cursor = buf_len;
+    }
+    break;
+  case XK_y:
+    if (buffer_redo(text_buffer)) {
+      buf_len = buffer_length(text_buffer);
+      cursor = prev_cursor - (prev_len - buf_len);
+      if (cursor < 0) cursor = 0;
+      if (cursor > buf_len) cursor = buf_len;
+    }
     break;
   case XK_a:
     goto_start_of_line();
@@ -317,19 +355,19 @@ handle_ctrl(KeySym key_sym)
   case XK_d:
     if (cursor < buf_len) {
       ++cursor;
-      insert_text(NULL, -1);
+      delete_text(1);
     }
     break;
   case XK_k:
-    if (cursor < buf_len && text_buffer[cursor] == '\n') {
+    if (cursor < buf_len && buffer_at(text_buffer, cursor) == '\n') {
       ++cursor;
-      insert_text(NULL, -1);
+      delete_text(1);
     } else {
       start = cursor;
-      while (cursor < buf_len && text_buffer[cursor] != '\n')
+      while (cursor < buf_len && buffer_at(text_buffer, cursor) != '\n')
         ++cursor;
       len = cursor - start;
-      insert_text(NULL, -len);
+      delete_text(len);
     }
     break;
   case XK_v:
@@ -355,25 +393,25 @@ handle_meta(int state, KeySym key_sym)
   }
   switch (key_sym) {
   case XK_f:
-    while (cursor < buf_len && isspace(text_buffer[cursor]))
+    while (cursor < buf_len && isspace(buffer_at(text_buffer, cursor)))
       ++cursor;
-    while (cursor < buf_len && !isspace(text_buffer[cursor]))
+    while (cursor < buf_len && !isspace(buffer_at(text_buffer, cursor)))
       ++cursor;
     break;
   case XK_b:
-    while (cursor > 0 && isspace(text_buffer[cursor - 1]))
+    while (cursor > 0 && isspace(buffer_at(text_buffer, cursor - 1)))
       --cursor;
-    while (cursor > 0 && !isspace(text_buffer[cursor - 1]))
+    while (cursor > 0 && !isspace(buffer_at(text_buffer, cursor - 1)))
       --cursor;
     break;
   case XK_d:
     start = cursor;
-    while (cursor < buf_len && isspace(text_buffer[cursor]))
+    while (cursor < buf_len && isspace(sq_buffer_at(text_buffer, cursor)))
       ++cursor;
-    while (cursor < buf_len && !isspace(text_buffer[cursor]))
+    while (cursor < buf_len && !isspace(sq_buffer_at(text_buffer, cursor)))
       ++cursor;
     len = cursor - start;
-    insert_text(NULL, -len);
+    delete_text(len);
     break;
   case XK_v:
     for (i = 0; i < height / ch; ++i)
@@ -381,13 +419,13 @@ handle_meta(int state, KeySym key_sym)
     break;
   case XK_BackSpace:
     start = cursor;
-    while (cursor > 0 && isspace(text_buffer[cursor - 1]))
+    while (cursor > 0 && isspace(sq_buffer_at(text_buffer, cursor - 1)))
       --cursor;
-    while (cursor > 0 && !isspace(text_buffer[cursor - 1]))
+    while (cursor > 0 && !isspace(sq_buffer_at(text_buffer, cursor - 1)))
       --cursor;
     len = start - cursor;
     cursor = start;
-    insert_text(NULL, -len);
+    delete_text(len);
     break;
   default:
     break;
@@ -397,14 +435,22 @@ handle_meta(int state, KeySym key_sym)
 void
 insert_text(char *text, int len)
 {
-  memmove(text_buffer + cursor + len, text_buffer + cursor, buf_len - cursor);
-  if (text != NULL)
-    memcpy(text_buffer + cursor, text, len);
-  buf_len += len;
+  if (!text_buffer || !text || len <= 0) return;
+  sq_buffer_insert(text_buffer, cursor, text, len);
   cursor += len;
   count_lines();
+  ensure_cursor_visible();
 }
 
+void
+delete_text(int count)
+{
+  if (!text_buffer || count <= 0 || cursor < count) return;
+  sq_buffer_delete(text_buffer, cursor - count, count);
+  cursor -= count;
+  count_lines();
+  ensure_cursor_visible();
+}
 void
 event_loop(void)
 {
@@ -429,10 +475,17 @@ event_loop(void)
       break;
     case KeyPress:
       key_event = &e.xkey;
-      key_sym = XLookupKeysym(key_event, 0);
+      len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
+      // key_sym = XLookupKeysym(key_event, 0);
+      
+      // i dont know how to fix it honestly, for example it registers my 'q' as 'й' no matter what
+      if (len == 1 && buf[0] >= 'a' && buf[0] <= 'z')
+	key_sym = (KeySym)buf[0];
+      
+      
       if (key_event->state & ControlMask) {
         handle_ctrl(key_sym);
-      } else if (key_event->state & (Mod1Mask | ALT_MASK)) {
+      } else if (key_event->state & (Mod1Mask /*| ALT_MASK */)) {
         handle_meta(key_event->state, key_sym);
       } else {
         len = XLookupString(key_event, buf, sizeof(buf), &key_sym, NULL);
@@ -446,7 +499,7 @@ event_loop(void)
           break;
         case XK_BackSpace:
           if (cursor > 0)
-            insert_text(NULL, -1);
+            delete_text(1);
           break;
         case XK_Left:
           backward_char();
