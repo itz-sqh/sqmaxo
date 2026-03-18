@@ -110,7 +110,7 @@ void
 count_lines(void)
 {
   int i, digits = 0;
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
 
   loff = cw;
   buf_lines = 1;
@@ -147,7 +147,7 @@ draw_text(XftColor *colour, int x, int y, const char *text, int len)
 void
 draw_buffer(void)
 {
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
   update_display_buffer();
   int cursor_ypos = 0, cursor_xpos, start = 0, i, len, y, lineno_len;
   char lineno_str[32];
@@ -183,7 +183,7 @@ void
 goto_line(int lineno)
 {
   int i, line = 1;
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
   for (i = 0; i < buf_len && line != lineno; ++i) {
     if (buffer_at(text_buffer, i) == '\n')
       ++line;
@@ -194,7 +194,7 @@ goto_line(int lineno)
 void
 goto_end_of_line(void)
 {
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
   while (cursor < buf_len && buffer_at(text_buffer, cursor) != '\n')
     ++cursor;
 }
@@ -240,7 +240,7 @@ void
 next_line(void)
 {
   int i, col_cur = 0, col_next = 0;
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
 
   for (i = cursor; i > 0 && buffer_at(text_buffer, i - 1) != '\n'; --i)
     ++col_cur;
@@ -258,7 +258,7 @@ next_line(void)
 void
 forward_char(void)
 {
-  buf_len = sq_buffer_length(text_buffer);
+  buf_len = buffer_length(text_buffer);
   if (cursor < buf_len)
     ++cursor;
 }
@@ -273,9 +273,9 @@ backward_char(void)
 void
 load_or_create_file(void)
 {
-  text_buffer = sq_buffer_create_from_file(cur_filename);
+  text_buffer = buffer_create_from_file(cur_filename);
   if (!text_buffer) {
-    text_buffer = sq_buffer_create();
+    text_buffer = buffer_create();
     if (!text_buffer) {
       fprintf(stderr, "could not create buffer\n");
       exit(1);
@@ -306,7 +306,7 @@ void
 handle_ctrl(KeySym key_sym)
 {
   int start, len, i;
-  int prev_len = sq_buffer_length(text_buffer);
+  int prev_len = buffer_length(text_buffer);
   int prev_cursor = cursor;
 
 
@@ -318,8 +318,8 @@ handle_ctrl(KeySym key_sym)
     save_to_file();
     break;
   case XK_z:
-    if (sq_buffer_undo(text_buffer)) {
-      buf_len = sq_buffer_length(text_buffer);
+    if (buffer_undo(text_buffer)) {
+      buf_len = buffer_length(text_buffer);
       cursor = prev_cursor - (prev_len - buf_len);
       // clamp ?
       if (cursor < 0) cursor = 0;
@@ -406,9 +406,9 @@ handle_meta(int state, KeySym key_sym)
     break;
   case XK_d:
     start = cursor;
-    while (cursor < buf_len && isspace(sq_buffer_at(text_buffer, cursor)))
+    while (cursor < buf_len && isspace(buffer_at(text_buffer, cursor)))
       ++cursor;
-    while (cursor < buf_len && !isspace(sq_buffer_at(text_buffer, cursor)))
+    while (cursor < buf_len && !isspace(buffer_at(text_buffer, cursor)))
       ++cursor;
     len = cursor - start;
     delete_text(len);
@@ -419,9 +419,9 @@ handle_meta(int state, KeySym key_sym)
     break;
   case XK_BackSpace:
     start = cursor;
-    while (cursor > 0 && isspace(sq_buffer_at(text_buffer, cursor - 1)))
+    while (cursor > 0 && isspace(buffer_at(text_buffer, cursor - 1)))
       --cursor;
-    while (cursor > 0 && !isspace(sq_buffer_at(text_buffer, cursor - 1)))
+    while (cursor > 0 && !isspace(buffer_at(text_buffer, cursor - 1)))
       --cursor;
     len = start - cursor;
     cursor = start;
@@ -436,7 +436,7 @@ void
 insert_text(char *text, int len)
 {
   if (!text_buffer || !text || len <= 0) return;
-  sq_buffer_insert(text_buffer, cursor, text, len);
+  buffer_insert(text_buffer, cursor, text, len);
   cursor += len;
   count_lines();
   ensure_cursor_visible();
@@ -446,7 +446,7 @@ void
 delete_text(int count)
 {
   if (!text_buffer || count <= 0 || cursor < count) return;
-  sq_buffer_delete(text_buffer, cursor - count, count);
+  buffer_delete(text_buffer, cursor - count, count);
   cursor -= count;
   count_lines();
   ensure_cursor_visible();
